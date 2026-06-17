@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-title Install gemini-claude-proxy
+title Install gemini-claude-web2api
 echo ============================================
-echo   gemini-claude-proxy — установка
+echo   gemini-claude-web2api — установка
 echo ============================================
 echo.
 

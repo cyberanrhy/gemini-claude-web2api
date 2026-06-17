@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title gemini-claude-proxy
+title gemini-claude-web2api
 
 :: Activate venv if exists
 if exist "venv\Scripts\activate.bat" call venv\Scripts\activate.bat

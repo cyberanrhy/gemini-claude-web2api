@@ -198,7 +198,7 @@ To make a local provider your default, add/change the `model` and `small_model` 
 ## Project Structure
 
 ```
-gemini-claude-proxy/
+gemini-claude-web2api/
 ├── gemini/
 │   ├── gemini_web2api.py       # Gemini proxy server (port 8081)
 │   ├── config.json.example

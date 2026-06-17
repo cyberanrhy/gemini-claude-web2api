@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 echo "============================================"
-echo "  gemini-claude-proxy — install"
+echo "  gemini-claude-web2api — install"
 echo "============================================"
 echo ""
 
