@@ -50,8 +50,6 @@ DEFAULT_CONFIG = {
     "cookie_file": None,
     "proxy": None,
     "api_keys": [],
-    "cerebras_api_key": None,
-    "cerebras_base_url": "https://api.cerebras.ai/v1",
 }
 
 CONFIG = dict(DEFAULT_CONFIG)
@@ -89,13 +87,8 @@ MODELS = {
         "mode": 6, "think": 4, "provider": "gemini",
         "desc": "Lightweight fast model",
     },
-    "zai-glm-4.7": {
-        "provider": "cerebras", "desc": "Z.ai GLM 4.7",
-    },
-    "gpt-oss-120b": {
-        "provider": "cerebras", "desc": "GPT-OSS 120B",
-    },
 }
+
 
 # ─── Utilities ───────────────────────────────────────────────────────────────
 
@@ -428,98 +421,6 @@ def strip_reasoning_content(messages: list) -> list:
             msg = {k: v for k, v in msg.items() if k != "reasoning_content"}
         cleaned.append(msg)
     return cleaned
-
-
-def _parse_cerebras_error(resp) -> str:
-    """Extract user-friendly error message from Cerebras response."""
-    try:
-        data = resp.json()
-        err = data.get("error", {})
-        msg = err.get("message", "")
-        code = err.get("code", "")
-        typ = err.get("type", "")
-        
-        if resp.status_code == 402:
-            return "Cerebras: insufficient balance (402 Payment Required). Top up your Cerebras account."
-        elif resp.status_code == 401:
-            return "Cerebras: invalid API key (401 Unauthorized). Check your key in config."
-        elif resp.status_code == 404:
-            return f"Cerebras: model not found (404). {msg}"
-        elif resp.status_code == 429:
-            return "Cerebras: rate limit exceeded (429). Wait and retry."
-        elif resp.status_code >= 500:
-            return f"Cerebras: server error ({resp.status_code}). Retry later."
-        elif msg:
-            return f"Cerebras: {msg}"
-        else:
-            return f"Cerebras: error {resp.status_code}"
-    except:
-        return f"Cerebras: error {resp.status_code}"
-
-
-def cerebras_chat_completions(req: dict):
-    """Proxy request to Cerebras API (non-streaming)."""
-    import httpx
-    
-    api_key = CONFIG.get("cerebras_api_key")
-    base_url = CONFIG.get("cerebras_base_url", "https://api.cerebras.ai/v1")
-    
-    if not api_key:
-        raise ValueError("Cerebras API key not configured")
-    
-    # Strip reasoning_content from messages
-    req = dict(req)
-    req["messages"] = strip_reasoning_content(req.get("messages", []))
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    
-    url = f"{base_url}/chat/completions"
-    
-    proxy = CONFIG.get("proxy")
-    transport = httpx.HTTPTransport(proxy=proxy) if proxy else None
-    
-    with httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"]) as client:
-        resp = client.post(url, json=req, headers=headers)
-        if resp.status_code != 200:
-            raise ValueError(_parse_cerebras_error(resp))
-        return resp.json()
-
-
-def cerebras_chat_completions_stream(req: dict):
-    """Proxy streaming request to Cerebras API."""
-    import httpx
-    
-    api_key = CONFIG.get("cerebras_api_key")
-    base_url = CONFIG.get("cerebras_base_url", "https://api.cerebras.ai/v1")
-    
-    if not api_key:
-        raise ValueError("Cerebras API key not configured")
-    
-    # Strip reasoning_content from messages
-    req = dict(req)
-    req["messages"] = strip_reasoning_content(req.get("messages", []))
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    
-    url = f"{base_url}/chat/completions"
-    
-    proxy = CONFIG.get("proxy")
-    transport = httpx.HTTPTransport(proxy=proxy) if proxy else None
-    
-    with httpx.Client(transport=transport, timeout=CONFIG["request_timeout_sec"]) as client:
-        with client.stream("POST", url, json=req, headers=headers) as resp:
-            if resp.status_code != 200:
-                error_msg = _parse_cerebras_error(resp)
-                yield f"data: {json.dumps({'error': {'message': error_msg}})}\n\n"
-                return
-            for line in resp.iter_lines():
-                yield line
 
 
 def extract_response_text(raw: str) -> str:
@@ -869,10 +770,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": err}}, 400)
             return
 
-        if provider == "cerebras":
-            self.handle_cerebras_chat(req, model_name)
-            return
-
         tools = req.get("tools")
         msgs = trim_context(req.get("messages", []))
         prompt = messages_to_prompt(msgs, tools)
@@ -943,29 +840,6 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 "usage": {"prompt_tokens": len(prompt)//4, "completion_tokens": len(text)//4,
                           "total_tokens": (len(prompt)+len(text))//4},
             })
-
-    def handle_cerebras_chat(self, req: dict, model_name: str):
-        """Handle chat completions via Cerebras API."""
-        stream = req.get("stream", False)
-        cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-
-        try:
-            if stream:
-                self._sendall(200, "text/event-stream", "", {"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
-                for line in cerebras_chat_completions_stream(req):
-                    if line.strip():
-                        # Cerebras returns SSE format, forward as-is
-                        self.request.sendall(f"{line}\n".encode())
-                self.request.sendall(b"data: [DONE]\n\n")
-            else:
-                resp = cerebras_chat_completions(req)
-                # Ensure response has correct format
-                resp["id"] = cid
-                resp["model"] = model_name
-                self.send_json(resp)
-        except Exception as e:
-            log(f"Cerebras error: {e}")
-            self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
 
     def handle_responses(self, body: bytes):
         """OpenAI Responses API for Codex CLI compatibility."""
