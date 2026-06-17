@@ -1,3 +1,5 @@
+![Control Panel Preview](preview.jpg)
+
 # Gemini & Claude Web2API — Free AI Proxy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
