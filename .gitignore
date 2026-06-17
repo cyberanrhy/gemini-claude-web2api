@@ -1,0 +1,28 @@
+# Cookies (sensitive auth data)
+cookie*.txt
+
+# Runtime config (user-specific)
+config.json
+!claude/config.json
+
+# Git config
+config
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+{
+  "port": 8081,
+  "host": "0.0.0.0",
+  "gemini_bl": "boq_assistant-bard-web-server_20260525.09_p0",
+  "auth_user": null,
+  "xsrf_token": "",
+  "api_keys": [],
+  "cookie_file": "cookie.txt",
+  "proxy": null,
+  "log_requests": true,
+  "default_model": "gemini-3.5-flash"
+}
