@@ -184,31 +184,36 @@ def format_prompt(messages, tools=None):
             label = f" (tool: {name})" if name else f" (id: {tid})" if tid else ""
             parts.append(f"Human: [Tool result{label}]\n{content}")
     if tools:
-        tool_descs = []
+        # Tool instruction goes FIRST, as a system-level directive
+        tool_instruction = (
+            "CRITICAL: You are an AI agent that interacts with the world ONLY through tool invocations. "
+            "You do NOT have a shell. You can NOT run commands directly. "
+            "Every action you take MUST be wrapped in a tool invocation.\n\n"
+            "Available tools:\n"
+        )
         for t in tools:
             fn = t.get("function", {})
             name = fn.get("name", "?")
             desc = fn.get("description", "")
-            tool_descs.append(f"  - {name}: {desc}" if desc else f"  - {name}")
-        parts.append("AVAILABLE TOOLS:\n" + "\n".join(tool_descs))
-        parts.append(
-            "You are an AI assistant that can ONLY interact with the environment "
-            "by using the tools above through structured invocations. "
-            "You do NOT have a real shell. NEVER output raw shell commands.\n\n"
-            "To invoke a tool, respond with EXACTLY this format:\n"
+            p = fn.get("parameters", {})
+            props = p.get("properties", {}) if isinstance(p, dict) else {}
+            params_str = ", ".join(f"{k}" for k in props.keys()) if props else ""
+            tool_instruction += f"  - {name}({params_str}): {desc}\n"
+        tool_instruction += (
+            "\nTo invoke a tool you MUST respond with EXACTLY this XML format — no markdown, no code blocks:\n"
             '<invoke tool="NAME"><parameter name="PARAM">VALUE</parameter></invoke>\n\n'
             "Examples:\n"
             '<invoke tool="bash"><parameter name="command">Get-ChildItem -Path "C:\\"</parameter></invoke>\n'
             '<invoke tool="read"><parameter name="filePath">C:\\file.txt</parameter></invoke>\n'
             '<invoke tool="glob"><parameter name="pattern">**/*.py</parameter></invoke>\n\n'
-            "RULES:\n"
-            "- ALWAYS use the tool format above — never raw commands.\n"
-            "- NEVER output code blocks with commands.\n"
-            "- If you need to read a file -> use the read tool.\n"
-            "- If you need to list files -> use bash or glob.\n"
-            "- Describe the result after the tool is invoked — don't guess.\n"
-            "- One invocation per response, wait for the result."
+            "IMPORTANT — these rules are absolute:\n"
+            "1. NEVER write a raw command like `Get-ChildItem` or `ls` — always use <invoke tool=\"bash\">\n"
+            "2. NEVER use code blocks like ```powershell — only <invoke> XML tags\n"
+            "3. NEVER say what you would do — just invoke the tool\n"
+            "4. Wait for the tool result before responding\n"
+            "5. If you don't know what tool to use, ask the user"
         )
+        parts.insert(0, f"System: {tool_instruction}")
     last_user_lang = "English"
     for msg in reversed(messages):
         if msg.get("role") == "user":
@@ -499,18 +504,30 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
                 json=payload, headers=headers, stream=True, timeout=240)
 
             if upstream.status_code != 200:
-                err_text = upstream.text[:300]
+                # stream=True means .text is empty for error responses;
+                # read the raw body via iter_content
+                err_body_bytes = b""
+                try:
+                    for chunk in upstream.iter_content():
+                        err_body_bytes += chunk
+                except:
+                    pass
+                try:
+                    err_body = json.loads(err_body_bytes.decode(errors="replace"))
+                    err_text = json.dumps(err_body, ensure_ascii=False)[:300]
+                except:
+                    err_text = err_body_bytes.decode(errors="replace")[:300]
                 log(f"upstream error: {upstream.status_code} {err_text}")
                 global _last_429_time, _last_429_message, _limit_reset_at
                 if upstream.status_code == 429:
                     _last_429_time = time.time()
                     _last_429_message = err_text
-                    # Try to extract reset time from response
+                    # Try to extract reset time from response body
                     try:
-                        err_body = json.loads(upstream.text)
+                        err_body = json.loads(err_body_bytes.decode(errors="replace"))
                         msg = err_body.get("error", {}).get("message", "")
-                        _last_429_message = msg[:300]
-                        # Look for "reset" or "retry" timestamp in the message
+                        if msg:
+                            _last_429_message = msg[:300]
                         import re
                         m = re.search(r'(?:reset|retry)\s*(?:at|in|after)?\s*:?\s*(\d{1,2}:\d{2})', msg, re.IGNORECASE)
                         if m:
@@ -526,7 +543,7 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
                         pass
                 detail = err_text
                 try:
-                    err_body = json.loads(upstream.text)
+                    err_body = json.loads(err_body_bytes.decode(errors="replace"))
                     detail = err_body.get("error", {}).get("message", err_text)
                 except:
                     pass
