@@ -146,15 +146,8 @@ def delete_chat(org_id, chat_id):
     except:
         pass
 
-def format_prompt(messages):
+def format_prompt(messages, tools=None):
     parts = []
-    # Check if tools are available
-    has_tools = False
-    for msg in messages:
-        tc = msg.get("tool_calls")
-        if tc:
-            has_tools = True
-            break
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content") or ""
@@ -178,6 +171,16 @@ def format_prompt(messages):
             tid = msg.get("tool_call_id", "")
             label = f" (tool: {name})" if name else f" (id: {tid})" if tid else ""
             parts.append(f"Human: [Tool result{label}]\n{content}")
+    if tools:
+        tool_descs = []
+        for t in tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "?")
+            desc = fn.get("description", "")
+            params = fn.get("parameters", {})
+            tool_descs.append(f"  - {name}: {desc}" if desc else f"  - {name}")
+        parts.append(f"You have the following tools available:\n" + "\n".join(tool_descs))
+        parts.append("When you need to perform an action, respond with the appropriate tool call using the <invoke tool=\"NAME\">JSON_ARGS</invoke> format. Use tools whenever possible instead of describing what you would do.")
     parts.append("Assistant:")
     return "\n\n".join(parts)
 
@@ -331,8 +334,9 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": "no messages"})
             return
 
+        tools = req.get("tools", [])
         model = req.get("model") or CONFIG.get("model") or "claude"
-        prompt = format_prompt(messages)
+        prompt = format_prompt(messages, tools)
         log(f"chat request: model={model}, stream={stream}, messages={len(messages)}")
 
         chat_id = create_chat(ORGANIZATION_ID)
