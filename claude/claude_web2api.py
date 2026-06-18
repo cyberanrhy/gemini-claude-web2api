@@ -180,11 +180,13 @@ def format_prompt(messages, tools=None):
             tool_descs.append(f"  - {name}: {desc}" if desc else f"  - {name}")
         parts.append("AVAILABLE TOOLS:\n" + "\n".join(tool_descs))
         parts.append(
-            "You MUST invoke tools using this exact format:\n\n"
-            "<invoke tool=\"TOOL_NAME\">\n{\"param1\": \"value1\"}\n</invoke>\n\n"
-            "Example:\n"
-            '<invoke tool="Bash">\n{"command": "ls -la"}\n</invoke>\n\n'
-            "Never describe actions — always use tool invocations."
+            "You MUST invoke tools to accomplish tasks. "
+            "Format: <invoke tool=\"NAME\"><parameter name=\"PARAM\">VALUE</parameter></invoke>\n\n"
+            "Examples:\n"
+            '<invoke tool="bash"><parameter name="command">Get-ChildItem -Path "C:\\"</parameter></invoke>\n'
+            '<invoke tool="read"><parameter name="filePath">C:\\file.txt</parameter></invoke>\n'
+            '<invoke tool="glob"><parameter name="pattern">**/*.py</parameter></invoke>\n\n'
+            "Always use tools — never describe what you would do."
         )
     parts.append("Assistant:")
     return "\n\n".join(parts)
@@ -215,12 +217,21 @@ def parse_tool_calls(text):
     results = []
     # Pattern 1: <invoke tool="NAME">ANYTHING</invoke>
     for m in re.finditer(r'<invoke\s+tool="([^"]+)"\s*>(.*?)</invoke>', text, re.DOTALL):
+        name = m.group(1)
         args_str = m.group(2).strip()
+        # Try JSON first
         try:
-            json.loads(args_str)  # validate it's valid JSON
-            results.append((m.group(1), args_str))
+            json.loads(args_str)
+            results.append((name, args_str))
+            continue
         except json.JSONDecodeError:
             pass
+        # Try XML parameters: <parameter name="X">VALUE</parameter>
+        params = {}
+        for pm in re.finditer(r'<parameter\s+name="([^"]+)"\s*>([^<]*)</parameter>', args_str):
+            params[pm.group(1)] = pm.group(2)
+        if params:
+            results.append((name, json.dumps(params)))
     if results:
         return results
     # Pattern 2: <atml:invoke name="NAME">...<atml:parameter name="P">V</atml:parameter>...</atml:invoke>
