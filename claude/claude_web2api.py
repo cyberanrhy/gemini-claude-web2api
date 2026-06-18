@@ -13,6 +13,13 @@ COOKIE_STRING = ""
 ORGANIZATION_ID = None
 CLAUDE_BASE = "https://claude.ai"
 
+# Usage tracking
+_completion_count = 0
+_completion_date = None  # date string YYYY-MM-DD of current counter
+_last_429_time = None
+_last_429_message = None
+_limit_reset_at = None
+
 def log(msg):
     print(f"[claude-proxy] {msg}", file=sys.stderr, flush=True)
 
@@ -208,6 +215,32 @@ def get_timezone():
     except:
         return "Europe/Moscow"
 
+# ── Usage tracking ────────────────────────────────────────────────────────────
+
+def _usage_tick():
+    global _completion_count, _completion_date
+    _usage_reset_if_new_day()
+    _completion_count += 1
+
+def _usage_reset_if_new_day():
+    global _completion_count, _completion_date
+    today = time.strftime("%Y-%m-%d")
+    if _completion_date != today:
+        _completion_count = 0
+        _completion_date = today
+        log(f"usage counter reset for new day {today}")
+
+def _usage_get():
+    _usage_reset_if_new_day()
+    return {
+        "completions": _completion_count,
+        "last_429_time": _last_429_time,
+        "last_429_message": _last_429_message,
+        "limit_reset_at": _limit_reset_at,
+    }
+
+# ── End usage tracking ────────────────────────────────────────────────────────
+
 def iter_sse_lines(resp):
     """Buffered SSE line iterator for curl_cffi streaming responses"""
     buf = ""
@@ -319,6 +352,8 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
         elif path == "/health" or path == "/":
             self._json_response(200, {"status": "ok", "org_id": ORGANIZATION_ID,
                                       "cookies": bool(COOKIE_STRING)})
+        elif path == "/v1/usage":
+            self._json_response(200, _usage_get())
         else:
             self._json_response(404, {"error": "not found"})
 
@@ -362,6 +397,54 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
 
         tools = req.get("tools", [])
         model = req.get("model") or CONFIG.get("model") or "claude"
+
+        # Check for /limit command
+        last_content = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                text = msg.get("content", "") or ""
+                if isinstance(text, list):
+                    text = " ".join(p.get("text", "") for p in text if isinstance(p, dict))
+                last_content = text.strip().lower()
+                break
+        if last_content == "/limit":
+            usage = _usage_get()
+            limit_hit = usage["last_429_message"] is not None
+            lines = [f"Completions today: {usage['completions']}"]
+            if limit_hit:
+                lines.append(f"Limit hit! {usage['last_429_message']}")
+            if usage["limit_reset_at"]:
+                from datetime import datetime
+                reset_dt = datetime.fromtimestamp(usage["limit_reset_at"])
+                lines.append(f"Reset at: {reset_dt.strftime('%H:%M')}")
+            else:
+                lines.append("No limit hit yet.")
+            msg_text = "\n".join(lines)
+            if stream:
+                self._sse_headers()
+                chunk = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": model,
+                    "choices": [{"index": 0, "delta": {"content": msg_text}, "finish_reason": None}]
+                }
+                self._send_sse(json.dumps(chunk, ensure_ascii=False))
+                final = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion.chunk",
+                    "created": int(time.time()), "model": model,
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                }
+                self._send_sse(json.dumps(final, ensure_ascii=False))
+                self._send_sse("[DONE]")
+            else:
+                self._json_response(200, {
+                    "id": f"chatcmpl-{uuid.uuid4().hex}", "object": "chat.completion",
+                    "created": int(time.time()), "model": model,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": msg_text}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+                })
+            self.close_connection = True
+            return
+
         prompt = format_prompt(messages, tools)
         log(f"chat request: model={model}, stream={stream}, messages={len(messages)}, tools={len(tools)}")
         if tools:
@@ -396,6 +479,29 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             if upstream.status_code != 200:
                 err_text = upstream.text[:300]
                 log(f"upstream error: {upstream.status_code} {err_text}")
+                global _last_429_time, _last_429_message, _limit_reset_at
+                if upstream.status_code == 429:
+                    _last_429_time = time.time()
+                    _last_429_message = err_text
+                    # Try to extract reset time from response
+                    try:
+                        err_body = json.loads(upstream.text)
+                        msg = err_body.get("error", {}).get("message", "")
+                        _last_429_message = msg[:300]
+                        # Look for "reset" or "retry" timestamp in the message
+                        import re
+                        m = re.search(r'(?:reset|retry)\s*(?:at|in|after)?\s*:?\s*(\d{1,2}:\d{2})', msg, re.IGNORECASE)
+                        if m:
+                            from datetime import datetime, timedelta
+                            reset_time = m.group(1)
+                            now = datetime.now()
+                            reset_dt = datetime.strptime(reset_time, "%H:%M").replace(
+                                year=now.year, month=now.month, day=now.day)
+                            if reset_dt <= now:
+                                reset_dt += timedelta(days=1)
+                            _limit_reset_at = reset_dt.timestamp()
+                    except:
+                        pass
                 detail = err_text
                 try:
                     err_body = json.loads(upstream.text)
@@ -408,9 +514,12 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             # Send SSE headers only after upstream is confirmed working
             if stream:
                 self._sse_headers()
-                self._stream_response(upstream, model)
+                ok = self._stream_response(upstream, model)
+                if ok:
+                    _usage_tick()
             else:
                 self._blocking_response(upstream, model)
+                _usage_tick()
 
         except Exception as e:
             log(f"request error: {e}")
@@ -444,8 +553,11 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
                         buf += text
                 elif data.get("type") == "error":
                     log(f"upstream SSE error: {data}")
+                    global _last_429_time, _last_429_message
+                    _last_429_time = time.time()
+                    _last_429_message = data.get("message", str(data))[:300]
                     self._sse_error(data.get("message", str(data)))
-                    return
+                    return False
                 elif data.get("type") in ("message_stop", "stop"):
                     break
                 elif data.get("type") == "content_block_delta":
@@ -457,7 +569,7 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
         except Exception as e:
             log(f"stream error: {e}")
             self._sse_error(str(e))
-            return
+            return False
 
         # Check for tool invocations in Claude's response
         if buf:
@@ -508,7 +620,7 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
                 self._send_sse(json.dumps(final, ensure_ascii=False))
                 self._send_sse("[DONE]")
                 self.close_connection = True
-                return
+                return True
 
         # No tool call — send as content
         if buf:
@@ -527,6 +639,7 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
         self._send_sse(json.dumps(final, ensure_ascii=False))
         self._send_sse("[DONE]")
         self.close_connection = True
+        return True
 
     def _blocking_response(self, upstream, model):
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"

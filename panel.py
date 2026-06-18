@@ -628,6 +628,15 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
         gemini_proxy = read_config("gemini")
         claude_proxy = read_config("claude")
 
+        claude_usage = None
+        if claude_alive:
+            code, body = http_get(f"http://127.0.0.1:{CLAUDE_PORT}/v1/usage", timeout=3)
+            if code == 200:
+                try:
+                    claude_usage = json.loads(body)
+                except:
+                    pass
+
         return {
             "gemini": {
                 "alive": gemini_alive,
@@ -646,6 +655,7 @@ class PanelHandler(http.server.BaseHTTPRequestHandler):
                 "cookie_expiry_days": claude_cookie_expiry,
                 "log_exists": os.path.exists(CLAUDE_LOG),
                 "proxy": claude_proxy,
+                "usage": claude_usage,
             },
             "vpn": {"alive": vpn_alive, "port": VPN_PORT},
         }
@@ -860,6 +870,7 @@ footer a:hover{color:#0f0}
       <div class="row"><span class="label" data-i18n="label_cookies">COOKIE EXPIRY</span><span class="value" id="claudeCookies">--</span></div>
       <div class="row"><span class="label" data-i18n="label_upstream">UPSTREAM</span><span class="value" id="claudeUpstream">--</span></div>
       <div class="row"><span class="label" data-i18n="label_proxy">PROXY</span><span class="value" id="claudeProxyRow"><span id="claudeProxyToggle" style="cursor:pointer"></span> <input id="claudeProxyUrl" type="text" style="background:#000;color:#0f0;border:1px solid #0a0;width:180px;font-family:inherit;font-size:0.85em;padding:1px 4px" placeholder="http://..."> <button class="btn small" onclick="saveProxy('claude')" data-i18n-title="title_save_proxy">SAVE</button></span></div>
+      <div class="row"><span class="label" data-i18n="label_usage">USAGE</span><span class="value" id="claudeUsage">--</span></div>
     </div>
     <div class="actions" id="claudeActions">
       <div class="installed-actions" id="claudeInstalled">
@@ -989,6 +1000,7 @@ const LANG = {
     empty: '[empty]',
     label_upstream: 'UPSTREAM',
     label_proxy: 'PROXY',
+    label_usage: 'USAGE',
     proxy_off: 'proxy OFF',
     proxy_saved: 'proxy config saved',
     proxy_no_url: 'Enter a proxy URL first',
@@ -1072,6 +1084,7 @@ const LANG = {
     empty: '[пусто]',
     label_upstream: 'АПСТРИМ',
     label_proxy: 'ПРОКСИ',
+    label_usage: 'ИСПОЛЬЗОВАНО',
     proxy_off: 'прокси ВЫКЛ',
     proxy_saved: 'настройки прокси сохранены',
     proxy_no_url: 'Сначала введи URL прокси',
@@ -1230,6 +1243,30 @@ async function fetchStatus(){
     } else if(s.installed) {
       ck.textContent = t('unknown');
       ck.style.color = '#060';
+    }
+
+    // Usage (Claude only)
+    if(name === 'claude'){
+      const usageEl = document.getElementById('claudeUsage');
+      if(s.usage && usageEl){
+        const u = s.usage;
+        const cnt = u.completions || 0;
+        let txt = cnt + ' / ?';
+        let color = '#0f0';
+        if(u.last_429_message){
+          txt = '⚠ ' + (u.last_429_message.substring(0, 80));
+          color = '#f00';
+        }
+        if(u.limit_reset_at){
+          const d = new Date(u.limit_reset_at * 1000);
+          txt += ' — reset ' + d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+        }
+        usageEl.textContent = txt;
+        usageEl.style.color = color;
+      } else if(usageEl) {
+        usageEl.textContent = '--';
+        usageEl.style.color = '#060';
+      }
     }
 
     // Proxy toggle
