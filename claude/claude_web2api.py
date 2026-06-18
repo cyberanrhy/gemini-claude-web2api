@@ -158,6 +158,11 @@ def format_prompt(messages, tools=None):
     for msg in messages:
         role = msg.get("role", "user")
         content = msg.get("content") or ""
+        # Strip system reminders meant for OpenCode, not for Claude
+        if isinstance(content, str):
+            content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL).strip()
+        if not content:
+            continue
         if role == "system":
             parts.append(f"System: {content}")
         elif role == "user":
@@ -187,13 +192,22 @@ def format_prompt(messages, tools=None):
             tool_descs.append(f"  - {name}: {desc}" if desc else f"  - {name}")
         parts.append("AVAILABLE TOOLS:\n" + "\n".join(tool_descs))
         parts.append(
-            "You MUST invoke tools to accomplish tasks. "
-            "Format: <invoke tool=\"NAME\"><parameter name=\"PARAM\">VALUE</parameter></invoke>\n\n"
+            "You are an AI assistant that can ONLY interact with the environment "
+            "by using the tools above through structured invocations. "
+            "You do NOT have a real shell. NEVER output raw shell commands.\n\n"
+            "To invoke a tool, respond with EXACTLY this format:\n"
+            '<invoke tool="NAME"><parameter name="PARAM">VALUE</parameter></invoke>\n\n'
             "Examples:\n"
             '<invoke tool="bash"><parameter name="command">Get-ChildItem -Path "C:\\"</parameter></invoke>\n'
             '<invoke tool="read"><parameter name="filePath">C:\\file.txt</parameter></invoke>\n'
             '<invoke tool="glob"><parameter name="pattern">**/*.py</parameter></invoke>\n\n'
-            "Always use tools — never describe what you would do."
+            "RULES:\n"
+            "- ALWAYS use the tool format above — never raw commands.\n"
+            "- NEVER output code blocks with commands.\n"
+            "- If you need to read a file -> use the read tool.\n"
+            "- If you need to list files -> use bash or glob.\n"
+            "- Describe the result after the tool is invoked — don't guess.\n"
+            "- One invocation per response, wait for the result."
         )
     last_user_lang = "English"
     for msg in reversed(messages):
@@ -277,6 +291,14 @@ def parse_tool_calls(text):
             results.append((name, json.dumps(params)))
     if results:
         return results
+    # Fallback: detect code blocks with shell commands and convert to bash invocations
+    # Pattern: ```powershell\nCOMMAND\n``` or ```ps\nCOMMAND\n```
+    for m in re.finditer(r'```(?:powershell|ps|bash|shell|cmd)?\s*\n(.+?)```', text, re.DOTALL):
+        cmd = m.group(1).strip().split("\n")[0].strip()
+        if cmd and len(cmd) > 3:
+            results.append(("bash", json.dumps({"command": cmd})))
+            log(f"fallback: converted code block to bash: {cmd[:80]}")
+    return results
     # Pattern 2: <atml:invoke name="NAME">...<atml:parameter name="P">V</atml:parameter>...</atml:invoke>
     for m in re.finditer(r'<atml:invoke\s+name="([^"]+)"\s*>', text):
         name = m.group(1)
