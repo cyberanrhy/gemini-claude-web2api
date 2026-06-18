@@ -188,6 +188,16 @@ def format_prompt(messages, tools=None):
             '<invoke tool="glob"><parameter name="pattern">**/*.py</parameter></invoke>\n\n'
             "Always use tools — never describe what you would do."
         )
+    last_user_lang = "English"
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            text = msg.get("content", "") or ""
+            if isinstance(text, list):
+                text = " ".join(p.get("text", "") for p in text if isinstance(p, dict))
+            if re.search(r'[а-яё]', text, re.IGNORECASE):
+                last_user_lang = "Russian"
+            break
+    parts.append(f"Respond in {last_user_lang}.")
     parts.append("Assistant:")
     return "\n\n".join(parts)
 
